@@ -9,14 +9,24 @@ from typing import Any
 class DispatchHealth:
     """Track the currently running GUI task and whether it timed out."""
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic):
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.monotonic,
+        heartbeat: Callable[[], float] | None = None,
+    ):
         self._clock = clock
+        # Optional provider of the GUI thread's last heartbeat tick, in the same
+        # clock domain. gui_dispatch supplies it; the snapshot is the CANONICAL
+        # owner of the age and get_rpc_status embeds it rather than computing
+        # its own (build blueprint s6.2 - one value, one home).
+        self._heartbeat = heartbeat
         self._lock = threading.Lock()
         self._active_task_id = 0
         self._operation = ""
         self._started_at = 0.0
         self._timed_out = False
         self._timeout_seconds = 0.0
+        self._timed_out_at = 0.0
 
     def start(self, task_id: int, operation: str) -> None:
         with self._lock:
@@ -25,6 +35,7 @@ class DispatchHealth:
             self._started_at = self._clock()
             self._timed_out = False
             self._timeout_seconds = 0.0
+            self._timed_out_at = 0.0
 
     def finish(self, task_id: int) -> None:
         """Clear state only when the finishing task is still the active one."""
@@ -36,6 +47,7 @@ class DispatchHealth:
             self._started_at = 0.0
             self._timed_out = False
             self._timeout_seconds = 0.0
+            self._timed_out_at = 0.0
 
     def mark_timed_out(self, task_id: int, timeout: float) -> dict[str, Any] | None:
         """Mark a running task as timed out and return the resulting snapshot."""
@@ -44,7 +56,47 @@ class DispatchHealth:
                 return None
             self._timed_out = True
             self._timeout_seconds = float(timeout)
+            self._timed_out_at = self._clock()
             return self._snapshot_locked()
+
+    def reset_stale(self) -> dict[str, Any] | None:
+        """Clear a STALE stuck flag. Clears ONLY when ``_timed_out`` is set.
+
+        BC-05's mechanism. The caller (health_probe.reset_dispatch_health) must
+        first prove the GUI thread is free with the BYPASSING probe; this method
+        performs no probe of its own and refuses - by returning None - when the
+        flag is not actually set, so "reset" can never mean "cleared a healthy
+        or merely busy dispatch".
+
+        Returns the cleared task's identity, or None when there was nothing
+        stale to clear.
+        """
+        with self._lock:
+            if not self._timed_out or self._active_task_id == 0:
+                return None
+            cleared = {
+                "task_id": self._active_task_id,
+                "operation": self._operation,
+                "was_stuck_for_s": round(max(0.0, self._clock() - self._timed_out_at), 3),
+                "running_for_seconds": round(max(0.0, self._clock() - self._started_at), 3),
+                "timeout_seconds": self._timeout_seconds,
+            }
+            self._active_task_id = 0
+            self._operation = ""
+            self._started_at = 0.0
+            self._timed_out = False
+            self._timeout_seconds = 0.0
+            self._timed_out_at = 0.0
+            return cleared
+
+    def _heartbeat_age_locked(self) -> float | None:
+        """Seconds since the GUI thread last ticked, or None when unknown."""
+        if self._heartbeat is None:
+            return None
+        try:
+            return round(max(0.0, self._clock() - self._heartbeat()), 3)
+        except Exception:
+            return None
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -65,6 +117,8 @@ class DispatchHealth:
                 "operation": "",
                 "running_for_seconds": 0.0,
                 "timeout_seconds": 0.0,
+                "stuck_since": None,
+                "last_gui_heartbeat_age_s": self._heartbeat_age_locked(),
             }
 
         elapsed = max(0.0, self._clock() - self._started_at)
@@ -74,6 +128,12 @@ class DispatchHealth:
             "operation": self._operation,
             "running_for_seconds": round(elapsed, 3),
             "timeout_seconds": self._timeout_seconds,
+            "stuck_since": self._timed_out_at if self._timed_out else None,
+            # A heartbeat that stops advancing while the RPC thread still
+            # answers is the signature of a REAL wedge, distinct from a flagged
+            # one. The AGE form wins over a timestamp (architecture); the
+            # acceptance sentence reads "the age grows without bound".
+            "last_gui_heartbeat_age_s": self._heartbeat_age_locked(),
         }
 
 

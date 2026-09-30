@@ -50,7 +50,27 @@ _SHUTDOWN = object()
 _processing = False  # re-entrancy guard: True while process_gui_tasks is draining
 _processing_since: float = 0.0  # wall-clock time when _processing became True
 _task_ids = itertools.count(1)
-_dispatch_health = DispatchHealth()
+
+# Heartbeat: the monotonic time of the GUI thread's last dispatch tick. The
+# 500 ms chain reschedules on every path, so an IDLE GUI keeps ticking; the
+# value stops advancing only when the GUI thread is genuinely not returning,
+# which is precisely the signal that separates a wedged thread from a stale
+# stuck flag. Recorded in process_gui_tasks - see the comment there for why the
+# placement is the whole mechanism.
+_last_gui_tick: float = time.monotonic()
+
+
+def gui_heartbeat_tick() -> float:
+    """Monotonic timestamp of the GUI thread's last dispatch tick."""
+    return _last_gui_tick
+
+
+def gui_heartbeat_age() -> float:
+    """Seconds since the GUI thread last ticked."""
+    return max(0.0, time.monotonic() - _last_gui_tick)
+
+
+_dispatch_health = DispatchHealth(heartbeat=gui_heartbeat_tick)
 
 
 class _WakeSignal(QtCore.QObject):
@@ -117,9 +137,18 @@ def process_gui_tasks(reschedule: bool = True) -> None:
     ``reschedule=False`` is used by the immediate-wake path so it does not
     start a second heartbeat chain alongside the existing 500 ms one.
     """
-    global _processing, _processing_since
+    global _processing, _processing_since, _last_gui_tick
     if _processing:
         return  # re-entrant call from processEvents inside a task; skip
+
+    # Heartbeat tick. The placement is the mechanism, not a detail:
+    #   * AFTER the re-entrancy guard's early return, so a long task calling
+    #     updateGui()/processEvents() - which re-enters here and returns at the
+    #     line above - CANNOT FORGE A TICK and cannot make a wedged thread look
+    #     alive;
+    #   * BEFORE the queue-empty check, so an idle GUI still ticks every 500 ms
+    #     and an empty queue is never mistaken for a stalled thread.
+    _last_gui_tick = time.monotonic()
 
     shutdown = False
     try:
@@ -186,6 +215,17 @@ def dispatch_to_gui(
 ) -> Any:
     """Run ``task`` on the GUI thread and return its result.
 
+    PUBLIC WRAPPER - signature unchanged from 5dbfe2c, including the literal
+    ``timeout: float = 60``, which is simultaneously the preserved signature
+    default and the budget table's ``gui_default.R``. This module deliberately
+    does NOT import the budget table: every call site in rpc_server.py passes an
+    explicit ``timeout=R, queue_timeout=Q`` resolved from it, which keeps the
+    budget import out of the hot path and keeps tests/test_gui_dispatch.py
+    untouched.
+
+    Behaviour for all 17 existing tools is unchanged: the rejection check runs
+    first, and the inner call is health-TRACKED.
+
     Uses a per-call response queue so a timeout in one call never corrupts
     the response for a subsequent call. Wakes the GUI thread immediately via
     a Qt signal instead of waiting for the next 500 ms heartbeat.
@@ -212,6 +252,36 @@ def dispatch_to_gui(
     if queue_timeout is None:
         queue_timeout = timeout
 
+    return _enqueue_and_wait(
+        task, timeout, queue_timeout, track_health=True, operation_name=operation_name
+    )
+
+
+def _enqueue_and_wait(
+    task: Callable[[], Any],
+    run_budget: float,
+    queue_budget: float,
+    *,
+    track_health: bool,
+    operation_name: str | None = None,
+) -> Any:
+    """The dispatch mechanism itself: FIFO, per-call response queue, Qt wake.
+
+    Identical for every caller except in ONE respect, ``track_health``:
+
+      * ``True``  - the 17 existing tools, reached through the public wrapper
+        above. DispatchHealth.start()/finish()/mark_timed_out() are called, so a
+        task that overruns its run budget marks dispatch stuck.
+      * ``False`` - health_probe.probe_gui ONLY. No DispatchHealth mutation at
+        all, because ``start()`` overwrites ``_active_task_id`` and a
+        health-tracked probe would CORRUPT THE STUCK TASK'S IDENTITY - the very
+        identity BC-05's reset has to act on. That caller also never reaches the
+        rejection check above, because the probe is the one caller allowed to
+        look past the flag.
+
+    The two-phase queue/run budgeting, the mouse/popup/modal guards and the
+    re-entrancy guard are unchanged for both.
+    """
     task_id = next(_task_ids)
     operation = operation_name or getattr(task, "__name__", "GUI operation")
     if operation == "<lambda>":
@@ -229,7 +299,8 @@ def dispatch_to_gui(
             if cancelled:
                 return  # caller timed out and went away; don't run a stale task
             started_at = time.monotonic()
-            _dispatch_health.start(task_id, operation)
+            if track_health:
+                _dispatch_health.start(task_id, operation)
             started_event.set()
         missing = object()
         res = missing
@@ -246,7 +317,8 @@ def dispatch_to_gui(
             # Publish completion atomically with clearing health, so a deadline
             # racing with completion cannot report a missing successful result.
             with state_lock:
-                _dispatch_health.finish(task_id)
+                if track_health:
+                    _dispatch_health.finish(task_id)
                 if res is not missing:
                     response_queue.put_nowait(res)
 
@@ -257,7 +329,7 @@ def dispatch_to_gui(
 
     # Phase 1: wait for the task to start. Earlier queued tasks run first on
     # the GUI thread; that wait must not eat into this task's run budget.
-    queue_deadline = queued_at + queue_timeout
+    queue_deadline = queued_at + queue_budget
     if not started_event.wait(max(0, queue_deadline - time.monotonic())):
         with state_lock:
             cancelled = started_at is None
@@ -266,7 +338,7 @@ def dispatch_to_gui(
         if _processing:
             busy_for = time.monotonic() - _processing_since
             hint = (
-                f" (GUI thread has been busy for {busy_for:.1f}s — for heavy OCCT"
+                f" (GUI thread has been busy for {busy_for:.1f}s - for heavy OCCT"
                 " geometry consider execute_code_async, which must apply document"
                 " writes through its commit() helper)"
             )
@@ -276,13 +348,13 @@ def dispatch_to_gui(
             "success": False,
             "error": (
                 f"GUI dispatch gave up after {queued_for:.1f}s waiting for "
-                f"'{operation}' to start (queue_timeout={queue_timeout:g}s){hint}"
+                f"'{operation}' to start (queue_timeout={queue_budget:g}s){hint}"
             ),
         }
 
     # Phase 2: count from actual GUI start, even if this RPC thread woke late.
     assert started_at is not None
-    run_remaining = max(0, started_at + timeout - time.monotonic())
+    run_remaining = max(0, started_at + run_budget - time.monotonic())
     try:
         return response_queue.get(timeout=run_remaining)
     except queue.Empty:
@@ -291,7 +363,8 @@ def dispatch_to_gui(
             try:
                 return response_queue.get_nowait()
             except queue.Empty:
-                stuck = _dispatch_health.mark_timed_out(task_id, timeout)
-                if stuck is not None:
-                    return stuck_failure(stuck, just_timed_out=True)
-                return {"success": False, "error": f"GUI dispatch timed out after {timeout}s"}
+                if track_health:
+                    stuck = _dispatch_health.mark_timed_out(task_id, run_budget)
+                    if stuck is not None:
+                        return stuck_failure(stuck, just_timed_out=True)
+                return {"success": False, "error": f"GUI dispatch timed out after {run_budget}s"}

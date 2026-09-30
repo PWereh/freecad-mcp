@@ -1,0 +1,38 @@
+{
+  "_comment": [
+    "freecad-mcp v0.2.0 - LOCAL / stdio registration. Merge the mcpServers block",
+    "below into claude_desktop_config.json (or your client's equivalent).",
+    "",
+    "KEEP THE SERVER KEY 'freecad'. Existing harness allowlists, hooks and tool",
+    "ids are keyed on it; renaming it silently invalidates all of them.",
+    "",
+    "TRANSPORT IS stdio, which is why this is a command + args block and not a",
+    "url. There is no HTTP endpoint in this server and none is built: the MCP",
+    "server is a loopback XML-RPC client of a GUI process on 127.0.0.1:9875, and",
+    "BC-06 (the client dies with its parent) is defined in terms of stdin EOF,",
+    "a signal that only exists under stdio.",
+    "",
+    "INSTALL THE ADDON FIRST. This client is deliberately REFUSED by a v0.1.23",
+    "addon; the v0.2.0 addon still serves a v0.1.23 client. Order: addon ->",
+    "restart FreeCAD -> verify -> swap this command path. See README.md.",
+    "",
+    "Every value in env is a PLACEHOLDER. There are no secrets in this server:",
+    "no token, key or licence value exists anywhere in it.",
+    "",
+    "Both env entries are OPTIONAL. Drop either one to take its default",
+    "(localhost / 9875). FREECAD_MCP_FREECADCMD is only needed when freecadcmd",
+    "is not on PATH; quote the path if it contains spaces. The two addon-side",
+    "variables (FREECAD_MCP_JOBS_DIR, FREECAD_MCP_OUTPUT_CAP) do NOT belong",
+    "here - they are read inside the FreeCAD process, not this one."
+  ],
+  "mcpServers": {
+    "freecad": {
+      "command": "<ABSOLUTE PATH TO freecad-mcp.exe, e.g. C:\\Claude\\freecad-mcp-v0.2.0\\.venv\\Scripts\\freecad-mcp.exe>",
+      "args": [],
+      "env": {
+        "FREECAD_MCP_HOST": "<HOST OF THE FREECAD ADDON, e.g. localhost>",
+        "FREECAD_MCP_PORT": "<XML-RPC PORT OF THE FREECAD ADDON, e.g. 9875>"
+      }
+    }
+  }
+}
