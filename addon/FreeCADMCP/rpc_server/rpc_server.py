@@ -308,6 +308,15 @@ class FreeCADRPC:
             # The header name the client stamps tokens into, REPORTED rather
             # than duplicated as a literal on both sides of the wire. One copy.
             "bridge_header": bridges.BRIDGE_HEADER,
+            # v0.2.1 - TWO DIFFERENT PROCESSES, NAMED AS SUCH. bridges[].pid is the pid each
+            # CLIENT passes to hello(pid): the freecad-mcp shim, never FreeCAD. Measured
+            # 2026-09-30 - bridges[0].pid resolved to a `python` process while the GUI was a
+            # different pid, so a reader asking "is FreeCAD up?" got a true answer to another
+            # question. This payload invited that confusion, so it now states both.
+            # freecad_pid is THIS process - the addon runs inside FreeCAD.
+            "freecad_pid": os.getpid(),
+            "bridges_pid_is": "the CLIENT shim's pid from hello(pid), never FreeCAD's - "
+                              "see freecad_pid for the FreeCAD process",
             "bridges": bridges.live(),
             # The EFFECTIVE receipt directory, so the client reads job receipts
             # from a reported path instead of guessing one. Resolved in THIS

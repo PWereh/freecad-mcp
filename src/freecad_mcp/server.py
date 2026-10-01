@@ -886,6 +886,20 @@ def gui_ping(ctx: Context, cap: float = 5.0) -> list[TextContent]:
       THIS IS NOT THE SAME AS DEAD. Wait, or poll again.
     - alive=false with last_gui_heartbeat_age_s growing without bound -> the GUI
       thread is genuinely wedged. Nothing outside that thread can interrupt it.
+    - alive=false with health.state "healthy" AND a FRESH heartbeat (v0.2.1) ->
+      the event loop is turning but the queue is NOT DRAINING. This is the
+      third case, and the one the two above invite you to miss: "not busy" plus
+      "heartbeat fresh" does NOT imply alive. Measured 2026-09-30 with a
+      heartbeat 0.032 s old and gui_ping unable to START within 120 s. The
+      heartbeat ticks BEFORE the drain decides whether to run, and the drain is
+      deferred while a popup, a modal or a held mouse button is present - so
+      only the drain is liveness. Read the structured fields rather than the
+      prose: failure_mode "queue_never_started" with queue_cause one of
+        gui_busy             -> wait
+        drain_deferred:<r>   -> clear <r> at the GUI (popup, modal, mouse)
+        drain_not_servicing  -> a human at the FreeCAD GUI
+      and compare health.heartbeat_age_s against health.drain_age_s: a fresh
+      heartbeat beside a stale drain is the signature of this case.
 
     Args:
         cap: Seconds, used as BOTH the run and the queue budget (default 5.0).
