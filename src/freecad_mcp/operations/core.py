@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Any
 
@@ -103,9 +104,10 @@ def execute_code_operation(
     code: str,
     include_screenshot: bool = True,
     view_name: str = "Isometric",
+    timeout: float | None = None,
 ) -> ToolResponse:
     try:
-        res = freecad.execute_code(code)
+        res = freecad.execute_code(code, timeout)
         if res["success"]:
             response = text_response(f"Code executed successfully: {res['message']}")
             # Only attempt screenshot when code completed and screenshots are wanted.
@@ -181,6 +183,22 @@ def get_async_status_operation(
         if job is None:
             return json_response(res.get("jobs", []))
         text = f"Async job {job['id']}: {job.get('state', 'unknown')}"
+        # Every v0.2.0 field is rendered ONLY WHEN PRESENT, which is the rule the
+        # baseline already applied to error and traceback. A record without them
+        # therefore renders byte-identically to 5dbfe2c - the exact string
+        # tests/test_async_status_text.py:38-41 asserts.
+        if job.get("plan_chunks") is not None or job.get("chunks"):
+            chunks = job.get("chunks") or []
+            done = sum(1 for c in chunks if isinstance(c, dict) and c.get("state") == "ok")
+            text += (
+                f"\nChunks: {len(chunks)}/{job.get('plan_chunks')} recorded, {done} ok"
+            )
+        if job.get("result") is not None:
+            text += f"\nResult: {json.dumps(job['result'], ensure_ascii=False, default=str)}"
+        if job.get("output"):
+            text += f"\nOutput:\n{job['output']}"
+        if job.get("output_truncated"):
+            text += "\n(output truncated at the addon's cap)"
         if job.get("error"):
             text += f"\nError: {job['error']}"
         if job.get("traceback"):
@@ -321,6 +339,42 @@ def run_fem_analysis_operation(
     except Exception as e:
         logger.error(f"Failed to run FEM analysis: {str(e)}")
         return text_response(f"Failed to run FEM analysis: {str(e)}")
+
+
+def gui_ping_operation(freecad: FreeCADConnection, cap: float = 5.0) -> ToolResponse:
+    """BC-04. Report whether the GUI thread answered a no-op within ``cap``.
+
+    Returns the probe's JSON body as text (structured_output=False), the fork's
+    universal convention: rxCAD parses text, and a structured-output tool would
+    change how its preflight reads the probe.
+    """
+    try:
+        return json_response(freecad.gui_ping(cap))
+    except Exception as e:
+        logger.error(f"Failed to ping the FreeCAD GUI thread: {str(e)}")
+        return text_response(f"Failed to ping the FreeCAD GUI thread: {str(e)}")
+
+
+def reset_dispatch_health_operation(
+    freecad: FreeCADConnection, force: bool = False
+) -> ToolResponse:
+    """BC-05. Clear a stale stuck flag, or report a real wedge unchanged."""
+    try:
+        return json_response(freecad.reset_dispatch_health(force))
+    except Exception as e:
+        logger.error(f"Failed to reset dispatch health: {str(e)}")
+        return text_response(f"Failed to reset dispatch health: {str(e)}")
+
+
+def set_gui_budget_operation(
+    freecad: FreeCADConnection, tool: str, R: float, Q: float | None = None
+) -> ToolResponse:
+    """BC-02. Set one per-tool budget on the addon and echo the new table."""
+    try:
+        return json_response(freecad.set_gui_budget(tool, R, Q))
+    except Exception as e:
+        logger.error(f"Failed to set GUI budget: {str(e)}")
+        return text_response(f"Failed to set GUI budget: {str(e)}")
 
 
 def reload_document_operation(

@@ -12,10 +12,13 @@ from .core import (
     get_async_status_operation,
     get_rpc_status_operation,
     get_view_operation,
+    gui_ping_operation,
     insert_part_from_library_operation,
     list_documents_operation,
     reload_document_operation,
+    reset_dispatch_health_operation,
     run_fem_analysis_operation,
+    set_gui_budget_operation,
 )
 
 __all__ = [
@@ -32,8 +35,11 @@ __all__ = [
     "get_async_status_operation",
     "get_rpc_status_operation",
     "get_view_operation",
+    "gui_ping_operation",
     "insert_part_from_library_operation",
     "list_documents_operation",
     "reload_document_operation",
+    "reset_dispatch_health_operation",
     "run_fem_analysis_operation",
+    "set_gui_budget_operation",
 ]

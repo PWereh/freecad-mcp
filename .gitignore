@@ -1,3 +1,6 @@
 __pycache__/
 .venv/
 .pytest_cache/
+
+# v0.2.0: job receipts written by the test suite (FREECAD_MCP_JOBS_DIR)
+.pytest-jobs/
