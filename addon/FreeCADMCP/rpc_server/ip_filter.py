@@ -2,6 +2,7 @@
 
 import ipaddress
 import re
+import socket
 from socketserver import ThreadingMixIn
 from xmlrpc.server import SimpleXMLRPCServer
 
@@ -22,6 +23,21 @@ class FilteredXMLRPCServer(ThreadingMixIn, SimpleXMLRPCServer):
     """
 
     daemon_threads = True
+
+    # NEVER share the port. SimpleXMLRPCServer defaults allow_reuse_address to True, and on
+    # Windows SO_REUSEADDR lets a SECOND FreeCAD bind 9875 while the first is still listening.
+    # Measured 2026-10-02: two FreeCADs (pids 16968, 4152) both LISTENING on 127.0.0.1:9875, each
+    # with its own documents, and any new bridge connection free to land in either - a mutation
+    # and its read-back could reach different processes. A second instance must fail to bind,
+    # loudly. Measured the same day: with reuse off, an immediate Stop->Start rebind still
+    # succeeds with server-side TIME_WAIT connections present, so restart is unaffected.
+    allow_reuse_address = False
+
+    def server_bind(self):
+        # Windows only: refuse even a later binder that asks for SO_REUSEADDR (an older addon).
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
     def __init__(self, addr, allowed_ips_str="127.0.0.1", **kwargs):
         self._allowed_networks = _parse_allowed_ips(allowed_ips_str)

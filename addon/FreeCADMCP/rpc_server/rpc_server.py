@@ -881,10 +881,20 @@ def start_rpc_server(port=9875):
     # server. See OPEN-3 in connections.py before reading meaning into the count.
     connections.set_logger(FreeCAD.Console.PrintMessage)
     bridges.set_logger(FreeCAD.Console.PrintMessage)
-    rpc_server_instance = FilteredXMLRPCServer(
-        (host, port), allowed_ips_str=allowed_ips, allow_none=True, logRequests=False,
-        requestHandler=BridgeAwareRequestHandler,
-    )
+    try:
+        rpc_server_instance = FilteredXMLRPCServer(
+            (host, port), allowed_ips_str=allowed_ips, allow_none=True, logRequests=False,
+            requestHandler=BridgeAwareRequestHandler,
+        )
+    except OSError as exc:
+        # The port is exclusive (ip_filter.FilteredXMLRPCServer). Failing here is the point: a
+        # second FreeCAD must not serve the bridge alongside the first.
+        rpc_server_instance = None
+        msg = (f"RPC Server not started: {host}:{port} is already in use ({exc}). Another "
+               f"FreeCAD is probably serving the MCP bridge; close it, or stop its RPC server, "
+               f"before starting one here.")
+        FreeCAD.Console.PrintError(msg + "\n")
+        return msg
     rpc_server_instance.register_instance(FreeCADRPC())
 
     def server_loop():
