@@ -39,6 +39,7 @@ from .operations import (
     run_fem_analysis_operation,
     set_gui_budget_operation,
 )
+from . import script_ref
 from .payload_screen import screen
 from .prompt_text import ASSET_CREATION_STRATEGY
 from .responses import json_response
@@ -590,7 +591,14 @@ def execute_code_async(ctx: Context, code: str) -> list[TextContent]:
 
 
 @mcp.tool(structured_output=False)
-def execute_code_headless(ctx: Context, code: str, timeout: float = 600) -> list[TextContent]:
+def execute_code_headless(
+    ctx: Context,
+    code: str | None = None,
+    timeout: float = 600,
+    script_path: str | None = None,
+    script_sha256: str | None = None,
+    params: dict[str, Any] | None = None,
+) -> list[TextContent]:
     """Run a FreeCAD Python script in a separate headless `freecadcmd` process.
 
     Use this for OCCT work that can crash or block FreeCAD: helical threads
@@ -608,13 +616,25 @@ def execute_code_headless(ctx: Context, code: str, timeout: float = 600) -> list
     open in the GUI, call reload_document(doc_name) to show the result.
 
     Args:
-        code: Complete Python script for freecadcmd.
+        code: Complete Python script for freecadcmd. Give exactly one of code or script_path.
         timeout: Positive finite seconds to wait before killing the process
             (default 600). Partial output is preserved on timeout.
+        script_path: v0.3.0 - instead of `code`, the absolute path of a governed script
+            under a root named in $FREECAD_MCP_SCRIPT_ROOTS (off when unset). The bridge
+            reads the file itself, so a long hash-pinned script never passes through a model.
+        script_sha256: Required with script_path: sha256 of the normalised text after the
+            separator line ($FREECAD_MCP_SCRIPT_SEPARATOR, default "# ---- BODY (hashed) ----").
+            The bridge refuses unless the bytes it reads hash to this value.
+        params: Only with script_path: a flat JSON object of scalars, injected as
+            `PARAMS = {...}` ahead of the body. The file's own header is never executed.
 
     Returns:
         Exit status, crash/timeout diagnosis and the script's printed output.
     """
+    try:
+        code = script_ref.resolve(code, script_path, script_sha256, params)
+    except script_ref.ScriptRefError as exc:
+        return json_response({"success": False, "error": f"script_path refused: {exc}"})
     illegal = screen(code)
     if illegal is not None:
         return json_response(illegal)
@@ -641,10 +661,13 @@ def get_async_status(ctx: Context, job_id: str = "") -> list[TextContent]:
 @mcp.tool(structured_output=False)
 def execute_code(
     ctx: Context,
-    code: str,
+    code: str | None = None,
     include_screenshot: bool = True,
     view_name: ViewName = "Isometric",
     timeout: float | None = None,
+    script_path: str | None = None,
+    script_sha256: str | None = None,
+    params: dict[str, Any] | None = None,
 ) -> list[TextContent | ImageContent]:
     """Execute arbitrary Python code in FreeCAD.
 
@@ -652,7 +675,7 @@ def execute_code(
     default for all document automation.
 
     Args:
-        code: The Python code to execute.
+        code: The Python code to execute. Give exactly one of code or script_path.
         include_screenshot: Whether to return a screenshot of the model (default True).
             Set to False to save tokens when the code does not change the model's
             appearance, e.g. analytical or computational scripts whose result is
@@ -663,10 +686,22 @@ def execute_code(
             than the server's configured budget for execute_code; requesting
             MORE is refused with the cap named, never silently clamped. Omit it
             to use the server's budget.
+        script_path: v0.3.0 - instead of `code`, the absolute path of a governed script
+            under a root named in $FREECAD_MCP_SCRIPT_ROOTS (off when unset). The bridge
+            reads the file itself, so a long hash-pinned script never passes through a model.
+        script_sha256: Required with script_path: sha256 of the normalised text after the
+            separator line ($FREECAD_MCP_SCRIPT_SEPARATOR, default "# ---- BODY (hashed) ----").
+            The bridge refuses unless the bytes it reads hash to this value.
+        params: Only with script_path: a flat JSON object of scalars, injected as
+            `PARAMS = {...}` ahead of the body. The file's own header is never executed.
 
     Returns:
         A message indicating the success or failure of the code execution, the output of the code execution, and a screenshot of the object.
     """
+    try:
+        code = script_ref.resolve(code, script_path, script_sha256, params)
+    except script_ref.ScriptRefError as exc:
+        return json_response({"success": False, "error": f"script_path refused: {exc}"})
     illegal = screen(code)
     if illegal is not None:
         return json_response(illegal)

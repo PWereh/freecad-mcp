@@ -798,7 +798,12 @@ class TestBC08_Canaries:
             actual = {p.name: p for p in params}
             for index, (name, default) in enumerate(expected):
                 assert name in actual, f"{tool}: parameter {name} was removed or renamed"
-                assert actual[name].default == default, (
+                # A REQUIRED parameter may become optional - every call that was valid before is
+                # still valid (v0.3.0: execute_code[_headless].code, so script_path can replace
+                # it). An EXISTING default may never change, and nothing may become required.
+                relaxed = (default is inspect.Parameter.empty
+                           and actual[name].default is not inspect.Parameter.empty)
+                assert relaxed or actual[name].default == default, (
                     f"{tool}.{name} default changed: "
                     f"{actual[name].default!r} != {default!r}"
                 )
