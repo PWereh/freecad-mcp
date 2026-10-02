@@ -113,3 +113,33 @@ def test_parse_command() -> None:
     assert parse_command("flatpak run --command=freecadcmd org.freecad.FreeCAD") == [
         "flatpak", "run", "--command=freecadcmd", "org.freecad.FreeCAD",
     ]
+
+
+# ---- v0.2.5: noise is matched by position; evidence lines survive ----------------------------
+
+BANNER = (
+    "FreeCAD 1.1.3, Libs: 1.1.3R20260725 (Git shallow)\n"
+    "(C) 2001-2026 FreeCAD contributors\n"
+    "FreeCAD is free and open-source software licensed under the terms of LGPL2+ license.\n"
+)
+
+
+def test_real_freecad_noise_is_still_removed() -> None:
+    noisy = BANNER + "Importing project files......\nPostprocessing...\nbuilding  (50 %)\nkept\n"
+    assert headless._clean(noisy) == "kept"
+
+
+def test_a_line_containing_the_freecad_version_is_kept() -> None:
+    """HP-1, 2026-10-02: this exact line was deleted because it CONTAINED 'FreeCAD 1.'."""
+    line = r'{"executable": "C:\Program Files\FreeCAD 1.1\bin\freecadcmd.exe"}'
+    assert headless._clean(line) == line
+
+
+def test_a_line_containing_a_percent_paren_is_kept() -> None:
+    line = "share of load = 12%) recorded"
+    assert headless._clean(line) == line
+
+
+def test_rxc_evidence_lines_are_never_filtered() -> None:
+    for line in ("RXC_JSON {\"progress\": \"(50 %)\"}", "RXC_JSON FreeCAD 1.1.3, Libs: x"):
+        assert headless._clean(line) == line

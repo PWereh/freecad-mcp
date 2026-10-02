@@ -21,7 +21,29 @@ from typing import Any
 logger = logging.getLogger("FreeCADMCPserver")
 
 FLATPAK_APP = "org.freecad.FreeCAD"
-_NOISE = ("%)", "Importing project files", "Postprocessing", "FreeCAD 1.", "(C) 2001", "LGPL")
+# v0.2.5: NOISE IS MATCHED BY POSITION, NEVER AS A SUBSTRING. The old tuple dropped any line that
+# merely CONTAINED "FreeCAD 1." or "%)". Measured 2026-10-02 in rxCAD HP-1: a probe's RXC_JSON
+# evidence line carried "C:\Program Files\FreeCAD 1.1\bin\freecadcmd.exe" and was silently
+# deleted - the run passed with its evidence missing. Each pattern below is anchored to the shape
+# of the real line it removes: the three banner lines freecadcmd prints (FreeCAD 1.1.3), the
+# document-load phases, and a trailing "(NN %)" progress counter.
+_NOISE = tuple(re.compile(p) for p in (
+    r"^FreeCAD \d+\.\d+(\.\d+)?, Libs: ",                       # banner line 1
+    r"^\(C\) 2001-\d{4} FreeCAD contributors$",                  # banner line 2
+    r"^FreeCAD is free and open-source software licensed under the terms of LGPL",  # line 3
+    r"^Importing project files",
+    r"^Postprocessing",
+    r"\(\s*\d{1,3}\s*%\)$",                                      # progress counter at line end
+))
+# Lines a harness marks as evidence are never filtered, whatever they contain (PW, 2026-10-02).
+_EVIDENCE_PREFIX = "RXC_"
+
+
+def _is_noise(line: str) -> bool:
+    text = line.strip()
+    if text.startswith(_EVIDENCE_PREFIX):
+        return False
+    return any(p.search(text) for p in _NOISE)
 
 
 def detect_freecadcmd() -> list[str] | None:
@@ -61,7 +83,7 @@ def _clean(output: str | bytes | None) -> str:
         return ""
     if isinstance(output, bytes):
         output = output.decode("utf-8", errors="replace")
-    lines = [ln for ln in output.splitlines() if ln.strip() and not any(n in ln for n in _NOISE)]
+    lines = [ln for ln in output.splitlines() if ln.strip() and not _is_noise(ln)]
     return "\n".join(lines)
 
 
