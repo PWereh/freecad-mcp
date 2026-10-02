@@ -215,10 +215,10 @@ class FreeCADRPC:
     # simply does not appear in the count. See rpc_server/bridges.py for why a
     # pid is never asked whether it is alive.
 
-    def hello(self, pid, instance=None, lease_s=None, contract=None):
+    def hello(self, pid, instance=None, lease_s=None, contract=None, client_pid=None):
         """Register this bridge. Returns a token to stamp on later requests."""
         return bridges.hello(pid, instance=instance, lease_s=lease_s,
-                             contract=contract)
+                             contract=contract, client_pid=client_pid)
 
     def heartbeat(self, token):
         """Renew an idle bridge's lease. Busy bridges renew via the header."""
