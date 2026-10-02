@@ -33,6 +33,7 @@ Robustness and performance guarantees:
 
 import itertools
 import queue
+import sys
 import threading
 import time
 import traceback
@@ -77,6 +78,31 @@ _unstarted_lock = threading.Lock()
 # How long the oldest unstarted task may wait before the queue is reported STALLED. Separate from
 # any per-call queue budget: this is a status signal, not a timeout.
 QUEUE_STALL_AFTER_S = 10.0
+
+
+# ---- v0.2.3: QT'S MOUSE STATE IS A CACHE, AND IT CAN GO STALE ----------------------------------
+# QApplication.mouseButtons() is the state Qt assembled from the press/release events it RECEIVED.
+# A release that never reaches this application - measured 2026-10-02, plausibly delivered to the
+# Document Recovery dialog as it closed - leaves it reporting a held button indefinitely, and the
+# drain then defers forever with nobody touching the mouse: Win32 GetAsyncKeyState read L/R/M all
+# UP while get_rpc_status reported mouse_button_held for 200 s and counting. So on Windows the OS
+# is asked before deferring. A deferral protects a REAL drag; when the OS says no button is down
+# there is no drag to protect, and the queue drains. Off Windows, or if the OS read fails, the
+# answer is None and Qt's state is trusted exactly as before.
+_VK_MOUSE_BUTTONS = (0x01, 0x02, 0x04, 0x05, 0x06)   # left, right, middle, X1, X2
+_mouse_stale_overrides = 0                            # times a stale Qt "held" was overruled
+
+
+def _os_buttons_down() -> bool | None:
+    """True/False from the OS on Windows; None when the OS cannot be asked."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        get = ctypes.windll.user32.GetAsyncKeyState
+        return any(get(vk) & 0x8000 for vk in _VK_MOUSE_BUTTONS)
+    except Exception:
+        return None
 
 
 def _set_defer(reason: str | None) -> None:
@@ -165,7 +191,7 @@ def process_gui_tasks(reschedule: bool = True) -> None:
     ``reschedule=False`` is used by the immediate-wake path so it does not
     start a second heartbeat chain alongside the existing 500 ms one.
     """
-    global _processing, _processing_since, _last_gui_tick, _last_drain_tick
+    global _processing, _processing_since, _last_gui_tick, _last_drain_tick, _mouse_stale_overrides
     if _processing:
         return  # re-entrant call from processEvents inside a task; skip
 
@@ -187,8 +213,12 @@ def process_gui_tasks(reschedule: bool = True) -> None:
         # Each deferral is now RECORDED with its reason. Before v0.2.1 these three returns were
         # silent, which is how a tick could keep the heartbeat fresh while the queue starved.
         if QtWidgets.QApplication.mouseButtons() != QtCore.Qt.NoButton:
-            _set_defer("mouse_button_held")
-            return  # user is dragging; defer to next tick
+            if _os_buttons_down() is False:
+                # Qt's cached state is stale: the OS says nothing is held, so nobody is dragging.
+                _mouse_stale_overrides += 1
+            else:
+                _set_defer("mouse_button_held")
+                return  # user is dragging; defer to next tick
         if QtWidgets.QApplication.activePopupWidget() is not None:
             _set_defer("popup_open")
             return  # context menu or popup open; defer to next tick
@@ -278,6 +308,8 @@ def get_queue_status() -> dict[str, Any]:
                                  else round(now - _drain_defer_since, 3)),
         "gui_processing": bool(_processing),
         "queue_stall_after_s": QUEUE_STALL_AFTER_S,
+        # v0.2.3: drains that went ahead because Qt said "held" and the OS said every button is up
+        "mouse_stale_overrides": _mouse_stale_overrides,
     }
 
 

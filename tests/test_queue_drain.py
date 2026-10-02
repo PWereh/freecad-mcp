@@ -33,9 +33,13 @@ def _app(popup=None, modal=None, buttons=0):
     )
 
 
-def _defer_with(gd, **state):
+def _defer_with(gd, os_down=None, **state):
     """Queue a dummy so the drain does not short-circuit on an empty queue, then run one tick
-    under the given GUI state. Returns nothing; the tick records the defer reason."""
+    under the given GUI state. Returns nothing; the tick records the defer reason.
+
+    os_down pins the OS mouse answer (v0.2.3). The default None is "OS cannot be asked", which keeps
+    Qt's state authoritative; without pinning, a test on Windows would read the real mouse."""
+    gd._os_buttons_down = lambda: os_down
     gd.QtWidgets.QApplication = _app(**state)
     gd._rpc_request_queue.put(lambda: None)
     gd.process_gui_tasks(reschedule=False)
@@ -156,3 +160,48 @@ def test_a_started_task_is_removed_from_the_waiting_set():
             gd._unstarted.clear()
         gd.process_gui_tasks(reschedule=False)
         assert gd.get_queue_status()["queue_depth"] == 0
+
+
+# ---- v0.2.3: a STALE Qt "button held" must not starve the queue ---------------------------------
+
+def _drained(gd):
+    ran = []
+    gd._rpc_request_queue.put(lambda: ran.append(1))
+    gd.process_gui_tasks(reschedule=False)
+    return bool(ran)
+
+
+def test_stale_qt_mouse_state_is_overruled_when_the_os_says_no_button_is_down():
+    """Measured 2026-10-02: Qt reported mouse_button_held for 200 s while Win32 said L/R/M all UP,
+    and the drain deferred forever. The OS answer wins; the drain runs and the override is counted."""
+    with load_gui_dispatch() as gd:
+        gd.QtWidgets.QApplication = _app(buttons=1)
+        gd._os_buttons_down = lambda: False
+        assert _drained(gd) is True
+        assert gd._mouse_stale_overrides == 1
+        assert gd._drain_defer_reason is None
+
+
+def test_a_real_held_button_still_defers():
+    with load_gui_dispatch() as gd:
+        gd.QtWidgets.QApplication = _app(buttons=1)
+        gd._os_buttons_down = lambda: True
+        assert _drained(gd) is False
+        assert gd._drain_defer_reason == "mouse_button_held"
+        assert gd._mouse_stale_overrides == 0
+
+
+def test_when_the_os_cannot_be_asked_qt_is_trusted_as_before():
+    with load_gui_dispatch() as gd:
+        gd.QtWidgets.QApplication = _app(buttons=1)
+        gd._os_buttons_down = lambda: None
+        assert _drained(gd) is False
+        assert gd._drain_defer_reason == "mouse_button_held"
+
+
+def test_the_override_count_is_reported_in_status():
+    with load_gui_dispatch() as gd:
+        gd.QtWidgets.QApplication = _app(buttons=1)
+        gd._os_buttons_down = lambda: False
+        _drained(gd)
+        assert gd.get_dispatch_status()["mouse_stale_overrides"] == 1

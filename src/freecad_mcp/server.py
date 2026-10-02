@@ -95,6 +95,20 @@ def get_freecad_connection() -> FreeCADConnection:
     even when FreeCAD is not running" behaviour survives: a stale addon is
     refused per call, with both versions named, rather than by refusing to boot.
     """
+    if state.freecad_connection is not None and _registration_lost(state.freecad_connection):
+        # v0.2.4: THE ADDON THIS BRIDGE REGISTERED WITH IS GONE. Measured 2026-10-02: after a
+        # FreeCAD restart a running shim kept serving every call while live_bridges read 0 for it -
+        # hello() ran only on first connect, the heartbeat thread had returned on its first failure
+        # (FreeCAD down), and the restarted addon's empty registry silently answered every header
+        # renewal False. G2 under-counted, which is the dangerous direction. Re-running the WHOLE
+        # connect sequence also re-asserts the bridge contract against the addon now listening,
+        # which a restart could have changed.
+        logger.warning("Bridge registration lost (FreeCAD restarted or lease expired); reconnecting")
+        stale, state.freecad_connection = state.freecad_connection, None
+        try:
+            stale.disconnect()
+        except Exception:
+            pass
     if state.freecad_connection is None:
         connection = FreeCADConnection(host=state.rpc_host, port=state.rpc_port)
         if not connection.ping():
@@ -145,6 +159,21 @@ _heartbeat_stop = threading.Event()
 _heartbeat_thread: threading.Thread | None = None
 
 
+def _registration_lost(connection) -> bool:
+    """True when a REGISTERED bridge can no longer be counted by the addon it is talking to.
+
+    Either the heartbeat said the addon does not know this token (FreeCAD restarted, or the lease
+    lapsed), or the heartbeat thread has stopped - it stops on its first failure, which is what a
+    FreeCAD shutdown looks like from here. A bridge that never registered (an addon without
+    hello()) is not "lost", so it is never sent round a reconnect loop.
+    """
+    if not getattr(connection, "bridge_token", None):
+        return False
+    if getattr(connection, "registration_lost", False):
+        return True
+    return _heartbeat_thread is None or not _heartbeat_thread.is_alive()
+
+
 def _start_heartbeat(connection) -> None:
     global _heartbeat_thread
     if _heartbeat_thread is not None and _heartbeat_thread.is_alive():
@@ -159,9 +188,17 @@ def _start_heartbeat(connection) -> None:
             if conn is None or not conn.bridge_token:
                 return
             try:
-                conn.heartbeat()
+                renewed = conn.heartbeat()
             except Exception as exc:
+                # Still returns - a bridge that cannot heartbeat is never propped up by this
+                # thread. The NEXT tool call notices the thread is gone and reconnects.
                 logger.debug(f"Bridge heartbeat stopped: {exc}")
+                return
+            if not renewed:
+                # The addon answered but does not know this token: it restarted, or the lease
+                # lapsed. Flag it; the next tool call re-registers.
+                conn.registration_lost = True
+                logger.warning("Bridge heartbeat not renewed: the addon no longer knows this bridge")
                 return
 
     _heartbeat_thread = threading.Thread(
