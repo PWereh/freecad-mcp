@@ -156,8 +156,17 @@ def _is_live(rec: dict, now: float) -> bool:
 
 
 def hello(pid: Any, instance: Any = None, lease_s: float | None = None,
-          contract: str | None = None) -> dict:
-    """Register one bridge. Returns its token, lease and the resulting count."""
+          contract: str | None = None, client_pid: Any = None) -> dict:
+    """Register one bridge. Returns its token, lease and the resulting count.
+
+    v0.3.1: ``client_pid`` is the process the bridge SERVES (the MCP client, e.g. claude.exe),
+    reported by the bridge itself. A new registration from the same client supersedes every older
+    one from that client. Measured 2026-10-02: an /mcp reconnect started a second bridge under the
+    same claude.exe (2500) without closing the first, both stayed registered, and rxCAD's G2 read
+    2 and halted the run. One client is never served by two bridges, so the newest wins; two
+    DIFFERENT clients still count as two, which is the case G2 exists to catch. The value is only
+    compared, never looked up: this module still never asks the OS about any pid.
+    """
     try:
         lease = DEFAULT_LEASE_S if lease_s is None else float(lease_s)
     except (TypeError, ValueError):
@@ -171,23 +180,33 @@ def hello(pid: Any, instance: Any = None, lease_s: float | None = None,
         if previous is not None:
             # Same bridge saying hello again (a reconnect). Supersede, never add.
             _bridges.pop(previous, None)
+        displaced = []
+        if client_pid is not None:
+            for old_token, rec in list(_bridges.items()):
+                if rec.get("client_pid") == client_pid:
+                    _bridges.pop(old_token, None)
+                    if _identity.get(rec["identity"]) == old_token:
+                        _identity.pop(rec["identity"], None)
+                    displaced.append(rec["pid"])
         _identity[key] = token
         _bridges[token] = {
             "token": token, "pid": pid, "instance": instance,
-            "identity": key, "contract": contract,
+            "identity": key, "contract": contract, "client_pid": client_pid,
             "registered_at": now, "last_seen": now,
             "lease_s": lease, "in_flight": 0, "calls": 0,
         }
         live_now = sum(1 for r in _bridges.values() if _is_live(r, now))
         superseded = previous is not None
     _log(
-        "MCP RPC: bridge hello pid=%s instance=%s %slease=%.0fs (live bridges: %d)\n"
-        % (pid, instance,
+        "MCP RPC: bridge hello pid=%s instance=%s client=%s %s%slease=%.0fs (live bridges: %d)\n"
+        % (pid, instance, client_pid,
            "(superseded its own earlier registration) " if superseded else "",
+           ("(displaced older bridge(s) of the same client: %s) " % displaced) if displaced else "",
            lease, live_now)
     )
     return {"success": True, "token": token, "lease_s": lease,
             "live_bridges": live_now, "superseded": superseded,
+            "displaced_same_client": displaced,
             "addon_pid": os.getpid()}
 
 

@@ -2,9 +2,10 @@ import logging
 import os
 import uuid
 import xmlrpc.client
+
 from typing import Any
 
-from . import budgets
+from . import budgets, client_identity
 
 
 logger = logging.getLogger("FreeCADMCPserver")
@@ -170,8 +171,14 @@ class FreeCADConnection:
         comes from the status echo. The pid is passed for diagnostics and
         identity; the addon never asks the operating system whether it is alive.
         """
+        client = client_identity.client_pid()
         with self._make_proxy(self._timeout) as proxy:
-            reply = proxy.hello(os.getpid(), BRIDGE_INSTANCE, lease_s, BRIDGE_CONTRACT)
+            try:
+                reply = proxy.hello(os.getpid(), BRIDGE_INSTANCE, lease_s, BRIDGE_CONTRACT, client)
+            except xmlrpc.client.Fault:
+                # An addon older than v0.3.1 takes four arguments. Register the old way rather
+                # than not at all - an unregistered bridge is invisible to G2.
+                reply = proxy.hello(os.getpid(), BRIDGE_INSTANCE, lease_s, BRIDGE_CONTRACT)
         if isinstance(reply, dict) and reply.get("token"):
             self.bridge_token = reply["token"]
             self.bridge_lease_s = reply.get("lease_s")
