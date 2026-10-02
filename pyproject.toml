@@ -1,6 +1,6 @@
 [project]
 name = "freecad-mcp"
-version = "0.2.3"
+version = "0.2.4"
 description = "FreeCAD MCP bridge (stdio), v0.2.0 rebuild per the bridge contract BC-01..BC-08"
 readme = "README.md"
 authors = [
